@@ -15,7 +15,9 @@ def test_bootstrap_parallel_options() -> None:
     expected.update(get_option_names(build.build_parallel))
     # bootstrap-parallel enforces sdist_only=True and handles
     # graph_file internally.
+    # test_mode is not supported in parallel mode.
     expected.discard("sdist_only")
     expected.discard("graph_file")
+    expected.discard("test_mode")
 
     assert set(get_option_names(bootstrap.bootstrap_parallel)) == expected
