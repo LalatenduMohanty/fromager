@@ -211,38 +211,11 @@ class Bootstrapper:
             # Remember that this is a prebuilt wheel, and where we got it.
             source_url_type = str(SourceType.PREBUILT)
         else:
-            # Look a few places for an existing wheel that matches what we need,
-            # using caches for locations where we might have built the wheel
-            # before.
-
-            # Check if we have previously built a wheel and still have it on the
-            # local filesystem.
-            if not wheel_filename and not cached_wheel_filename:
-                cached_wheel_filename, unpacked_cached_wheel = (
-                    self._look_for_existing_wheel(
-                        req,
-                        resolved_version,
-                        self.ctx.wheels_build,
-                    )
-                )
-
-            # Check if we have previously downloaded a wheel and still have it
-            # on the local filesystem.
-            if not wheel_filename and not cached_wheel_filename:
-                cached_wheel_filename, unpacked_cached_wheel = (
-                    self._look_for_existing_wheel(
-                        req,
-                        resolved_version,
-                        self.ctx.wheels_downloads,
-                    )
-                )
-
-            # Look for a wheel on the cache server and download it if there is
-            # one.
-            if not wheel_filename and not cached_wheel_filename:
-                cached_wheel_filename, unpacked_cached_wheel = (
-                    self._download_wheel_from_cache(req, resolved_version)
-                )
+            # Look for an existing wheel in caches (3 levels: build, downloads,
+            # cache server) before building from source.
+            cached_wheel_filename, unpacked_cached_wheel = self._find_cached_wheel(
+                req, resolved_version
+            )
 
             if not unpacked_cached_wheel:
                 # We didn't find anything so we are going to have to build the
@@ -520,6 +493,45 @@ class Bootstrapper:
         # and available to subsequent builds that need them as dependencies
         server.update_wheel_mirror(self.ctx)
         return (wheel_filename, unpack_dir)
+
+    def _find_cached_wheel(
+        self,
+        req: Requirement,
+        resolved_version: Version,
+    ) -> tuple[pathlib.Path | None, pathlib.Path | None]:
+        """Look for cached wheel in 3 locations.
+
+        Checks for cached wheels in order:
+        1. wheels_build directory (previously built)
+        2. wheels_downloads directory (previously downloaded)
+        3. Cache server (remote cache)
+
+        Returns:
+            Tuple of (cached_wheel_filename, unpacked_cached_wheel).
+            Both None if no cache hit.
+        """
+        # Check if we have previously built a wheel and still have it on the
+        # local filesystem.
+        cached_wheel, unpacked = self._look_for_existing_wheel(
+            req, resolved_version, self.ctx.wheels_build
+        )
+        if cached_wheel:
+            return cached_wheel, unpacked
+
+        # Check if we have previously downloaded a wheel and still have it
+        # on the local filesystem.
+        cached_wheel, unpacked = self._look_for_existing_wheel(
+            req, resolved_version, self.ctx.wheels_downloads
+        )
+        if cached_wheel:
+            return cached_wheel, unpacked
+
+        # Look for a wheel on the cache server and download it if there is one.
+        cached_wheel, unpacked = self._download_wheel_from_cache(req, resolved_version)
+        if cached_wheel:
+            return cached_wheel, unpacked
+
+        return None, None
 
     def _look_for_existing_wheel(
         self,
