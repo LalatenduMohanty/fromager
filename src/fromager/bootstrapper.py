@@ -292,34 +292,15 @@ class Bootstrapper:
             wheel_filename=wheel_filename,
         )
 
-        if wheel_filename is not None:
-            assert unpack_dir is not None
-            logger.debug(
-                "get install dependencies of wheel %s",
-                wheel_filename.name,
-            )
-            install_dependencies = dependencies.get_install_dependencies_of_wheel(
-                req=req,
-                wheel_filename=wheel_filename,
-                requirements_file_dir=unpack_dir,
-            )
-        elif sdist_filename is not None:
-            assert sdist_root_dir is not None
-            assert build_env is not None
-            logger.debug(
-                "get install dependencies of sdist from directory %s",
-                sdist_root_dir,
-            )
-            install_dependencies = dependencies.get_install_dependencies_of_sdist(
-                ctx=self.ctx,
-                req=req,
-                version=resolved_version,
-                sdist_root_dir=sdist_root_dir,
-                build_env=build_env,
-            )
-        else:
-            # unreachable
-            raise RuntimeError("wheel_filename and sdist_filename are None")
+        install_dependencies = self._get_install_dependencies(
+            req=req,
+            resolved_version=resolved_version,
+            wheel_filename=wheel_filename,
+            sdist_filename=sdist_filename,
+            sdist_root_dir=sdist_root_dir,
+            build_env=build_env,
+            unpack_dir=unpack_dir,
+        )
 
         logger.debug(
             "install dependencies: %s",
@@ -532,6 +513,56 @@ class Bootstrapper:
             return cached_wheel, unpacked
 
         return None, None
+
+    def _get_install_dependencies(
+        self,
+        req: Requirement,
+        resolved_version: Version,
+        wheel_filename: pathlib.Path | None,
+        sdist_filename: pathlib.Path | None,
+        sdist_root_dir: pathlib.Path | None,
+        build_env: build_environment.BuildEnvironment | None,
+        unpack_dir: pathlib.Path | None,
+    ) -> list[Requirement]:
+        """Extract install dependencies from wheel or sdist.
+
+        Returns:
+            List of install requirements.
+
+        Raises:
+            RuntimeError: If both wheel_filename and sdist_filename are None.
+        """
+        if wheel_filename is not None:
+            assert unpack_dir is not None
+            logger.debug(
+                "get install dependencies of wheel %s",
+                wheel_filename.name,
+            )
+            return list(
+                dependencies.get_install_dependencies_of_wheel(
+                    req=req,
+                    wheel_filename=wheel_filename,
+                    requirements_file_dir=unpack_dir,
+                )
+            )
+        elif sdist_filename is not None:
+            assert sdist_root_dir is not None
+            assert build_env is not None
+            logger.debug(
+                "get install dependencies of sdist from directory %s",
+                sdist_root_dir,
+            )
+            return list(
+                dependencies.get_install_dependencies_of_sdist(
+                    ctx=self.ctx,
+                    req=req,
+                    version=resolved_version,
+                    sdist_root_dir=sdist_root_dir,
+                    build_env=build_env,
+                )
+            )
+        else:
+            raise RuntimeError("wheel_filename and sdist_filename are None")
 
     def _look_for_existing_wheel(
         self,
