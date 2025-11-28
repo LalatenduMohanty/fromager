@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import operator
@@ -38,6 +39,21 @@ logger = logging.getLogger(__name__)
 
 # package name, extras, version, sdist/wheel
 SeenKey = tuple[NormalizedName, tuple[str, ...], str, typing.Literal["sdist", "wheel"]]
+
+
+@dataclasses.dataclass
+class SourceBuildResult:
+    """Result of building a package from source.
+
+    Used to return multiple values from _build_from_source().
+    """
+
+    wheel_filename: pathlib.Path | None
+    sdist_filename: pathlib.Path | None
+    unpack_dir: pathlib.Path
+    sdist_root_dir: pathlib.Path
+    build_env: build_environment.BuildEnvironment
+    source_url_type: str
 
 
 class Bootstrapper:
