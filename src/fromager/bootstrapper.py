@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
 import logging
 import operator
@@ -56,6 +57,76 @@ class SourceBuildResult:
     source_type: SourceType
 
 
+@dataclasses.dataclass
+class BuildFailure:
+    """Record of a package build failure in test mode.
+
+    Captures the full dependency chain that led to the failure,
+    enabling detailed reporting of where problems occurred.
+    """
+
+    req: Requirement
+    version: Version
+    error: Exception
+    error_type: str
+    timestamp: datetime.datetime
+    dependency_chain: list[tuple[RequirementType, Requirement, Version]]
+    fallback_status: str
+
+    @property
+    def root_package(self) -> str:
+        """Get the top-level package that led to this failure."""
+        if self.dependency_chain:
+            return str(self.dependency_chain[0][1].name)
+        return str(self.req.name)
+
+    @property
+    def immediate_parent(self) -> tuple[str, str, str] | None:
+        """Get the immediate parent that depends on the failed package."""
+        if self.dependency_chain:
+            rt, req, ver = self.dependency_chain[-1]
+            return (rt.name, str(req.name), str(ver))
+        return None
+
+    @property
+    def chain_depth(self) -> int:
+        """Get the depth of this failure in the dependency tree."""
+        return len(self.dependency_chain)
+
+    def format_chain(self) -> str:
+        """Format the dependency chain for human-readable output."""
+        if not self.dependency_chain:
+            return f"TOP_LEVEL: {self.req.name}=={self.version}"
+
+        lines = []
+        for i, (rt, req, ver) in enumerate(self.dependency_chain):
+            indent = "    " * i
+            lines.append(f"{indent}└── {rt.name}: {req.name}=={ver}")
+
+        indent = "    " * len(self.dependency_chain)
+        lines.append(f"{indent}└── ❌ FAILED: {self.req.name}=={self.version}")
+
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, typing.Any]:
+        """Serialize for JSON output."""
+        return {
+            "package": str(self.req.name),
+            "version": str(self.version),
+            "error": str(self.error),
+            "error_type": self.error_type,
+            "timestamp": self.timestamp.isoformat(),
+            "fallback_status": self.fallback_status,
+            "root_package": self.root_package,
+            "immediate_parent": self.immediate_parent,
+            "chain_depth": self.chain_depth,
+            "dependency_chain": [
+                {"type": rt.name, "package": str(r.name), "version": str(v)}
+                for rt, r, v in self.dependency_chain
+            ],
+        }
+
+
 class Bootstrapper:
     def __init__(
         self,
@@ -64,12 +135,14 @@ class Bootstrapper:
         prev_graph: DependencyGraph | None = None,
         cache_wheel_server_url: str | None = None,
         sdist_only: bool = False,
+        test_mode: bool = False,
     ) -> None:
         self.ctx = ctx
         self.progressbar = progressbar or progress.Progressbar(None)
         self.prev_graph = prev_graph
         self.cache_wheel_server_url = cache_wheel_server_url or ctx.wheel_server_url
         self.sdist_only = sdist_only
+        self.test_mode = test_mode
         self.why: list[tuple[RequirementType, Requirement, Version]] = []
         # Push items onto the stack as we start to resolve their
         # dependencies so at the end we have a list of items that need to
@@ -88,6 +161,9 @@ class Bootstrapper:
         self._resolved_requirements: dict[str, tuple[str, Version]] = {}
 
         self._build_order_filename = self.ctx.work_dir / "build-order.json"
+
+        # Test mode: track build failures for reporting
+        self._build_failures: list[BuildFailure] = []
 
     def resolve_version(
         self,
@@ -529,8 +605,57 @@ class Bootstrapper:
 
         Raises:
             Various exceptions from download, prepare, or build steps.
-            This is where test-mode will catch exceptions.
+            In test_mode, catches exceptions and falls back to prebuilt wheels.
         """
+        try:
+            return self._build_from_source_impl(
+                req=req,
+                resolved_version=resolved_version,
+                source_url=source_url,
+                build_sdist_only=build_sdist_only,
+                cached_wheel_filename=cached_wheel_filename,
+                unpacked_cached_wheel=unpacked_cached_wheel,
+            )
+        except Exception as e:
+            if not self.test_mode:
+                raise
+
+            logger.warning(
+                f"[TEST MODE] Build failed for {req.name}=={resolved_version}: {e}"
+            )
+            self._record_failure(
+                req=req,
+                version=resolved_version,
+                error=e,
+                error_type="build",
+                fallback_status="pending",
+            )
+
+            try:
+                result = self._fallback_to_prebuilt(req, resolved_version)
+                self._build_failures[-1].fallback_status = "prebuilt_success"
+                return result
+            except Exception as fallback_error:
+                self._build_failures[-1].fallback_status = "prebuilt_failed"
+                self._record_failure(
+                    req=req,
+                    version=resolved_version,
+                    error=fallback_error,
+                    error_type="prebuilt_fallback",
+                    fallback_status="prebuilt_failed",
+                )
+                raise
+
+    def _build_from_source_impl(
+        self,
+        req: Requirement,
+        resolved_version: Version,
+        source_url: str,
+        build_sdist_only: bool,
+        cached_wheel_filename: pathlib.Path | None,
+        unpacked_cached_wheel: pathlib.Path | None,
+    ) -> SourceBuildResult:
+        """Internal implementation of build from source."""
         # Download and prepare source (if no cached wheel)
         if not unpacked_cached_wheel:
             logger.debug("no cached wheel, downloading sources")
@@ -1127,3 +1252,181 @@ class Bootstrapper:
             # Requirement and Version instances that can't be
             # converted to JSON without help.
             json.dump(self._build_stack, f, indent=2, default=str)
+
+    # Test mode methods
+
+    def _record_failure(
+        self,
+        req: Requirement,
+        version: Version,
+        error: Exception,
+        error_type: str,
+        fallback_status: str = "pending",
+    ) -> None:
+        """Record a build failure for later reporting in test mode."""
+        failure = BuildFailure(
+            req=req,
+            version=version,
+            error=error,
+            error_type=error_type,
+            timestamp=datetime.datetime.now(),
+            dependency_chain=list(self.why),
+            fallback_status=fallback_status,
+        )
+        self._build_failures.append(failure)
+        logger.warning(
+            f"[TEST MODE] Recorded build failure for {req.name}=={version}: "
+            f"{error_type} - {error}"
+        )
+
+    def _fallback_to_prebuilt(
+        self,
+        req: Requirement,
+        resolved_version: Version,
+    ) -> SourceBuildResult:
+        """Attempt to download a prebuilt wheel after build failure in test mode."""
+        logger.info(
+            f"[TEST MODE] Attempting to download prebuilt wheel for "
+            f"{req.name}=={resolved_version}"
+        )
+
+        try:
+            servers = wheels.get_wheel_server_urls(
+                self.ctx, req, cache_wheel_server_url=resolver.PYPI_SERVER_URL
+            )
+            wheel_url, _ = wheels.resolve_prebuilt_wheel(
+                ctx=self.ctx,
+                req=Requirement(f"{req.name}=={resolved_version}"),
+                wheel_server_urls=servers,
+                req_type=RequirementType.INSTALL,
+            )
+            wheel_filename = wheels.download_wheel(
+                req, wheel_url, self.ctx.wheels_prebuilt
+            )
+            unpack_dir = self._create_unpack_dir(req, resolved_version)
+            server.update_wheel_mirror(self.ctx)
+
+            logger.info(
+                f"[TEST MODE] Successfully downloaded prebuilt wheel for "
+                f"{req.name}=={resolved_version}"
+            )
+
+            return SourceBuildResult(
+                wheel_filename=wheel_filename,
+                sdist_filename=None,
+                unpack_dir=unpack_dir,
+                sdist_root_dir=None,
+                build_env=None,
+                source_type=SourceType.PREBUILT,
+            )
+        except Exception as fallback_error:
+            logger.error(
+                f"[TEST MODE] Failed to download prebuilt wheel for "
+                f"{req.name}=={resolved_version}: {fallback_error}"
+            )
+            raise
+
+    def has_failures(self) -> bool:
+        """Check if any build failures occurred in test mode."""
+        return len(self._build_failures) > 0
+
+    def get_build_failures(self) -> list[BuildFailure]:
+        """Return list of all build failures recorded in test mode."""
+        return list(self._build_failures)
+
+    def get_failures_by_root(self) -> dict[str, list[BuildFailure]]:
+        """Group failures by the root (TOP_LEVEL) package."""
+        by_root: dict[str, list[BuildFailure]] = {}
+        for failure in self._build_failures:
+            root = failure.root_package
+            by_root.setdefault(root, []).append(failure)
+        return by_root
+
+    def get_failure_summary(self) -> dict[str, typing.Any]:
+        """Get a summary of all build failures for reporting."""
+        fallback_success = sum(
+            1 for f in self._build_failures if f.fallback_status == "prebuilt_success"
+        )
+        fallback_failed = sum(
+            1 for f in self._build_failures if f.fallback_status == "prebuilt_failed"
+        )
+
+        return {
+            "total_failures": len(self._build_failures),
+            "fallback_success": fallback_success,
+            "fallback_failed": fallback_failed,
+            "failures_by_root": {
+                root: [f.to_dict() for f in failures]
+                for root, failures in self.get_failures_by_root().items()
+            },
+        }
+
+    def report_test_mode_failures(self) -> None:
+        """Report build failures that occurred during test mode bootstrap."""
+        failures = self.get_build_failures()
+        summary = self.get_failure_summary()
+
+        # Console output
+        print("\n" + "=" * 80)
+        print("TEST MODE: Build Failures Summary")
+        print("=" * 80)
+        print(f"\nTotal build failures: {summary['total_failures']}")
+        print(f"Fallback to prebuilt succeeded: {summary['fallback_success']}")
+        print(f"Fallback to prebuilt failed: {summary['fallback_failed']}")
+
+        # Group by root package
+        failures_by_root = self.get_failures_by_root()
+        if failures_by_root:
+            print("\n" + "-" * 80)
+            print("Failures by Root Package:")
+            print("-" * 80)
+            for root, root_failures in sorted(failures_by_root.items()):
+                print(f"\n{root}:")
+                for failure in root_failures:
+                    status_icon = (
+                        "✓" if failure.fallback_status == "prebuilt_success" else "✗"
+                    )
+                    print(
+                        f"  {status_icon} {failure.req.name}=={failure.version} "
+                        f"(depth: {failure.chain_depth}, "
+                        f"fallback: {failure.fallback_status})"
+                    )
+
+        # Detailed failures
+        print("\n" + "-" * 80)
+        print("Detailed Failures:")
+        print("-" * 80)
+        for i, failure in enumerate(failures, 1):
+            print(f"\n[{i}] {failure.req.name}=={failure.version}")
+            print(f"    Error Type: {failure.error_type}")
+            print(f"    Error: {failure.error}")
+            print(f"    Fallback Status: {failure.fallback_status}")
+            print("    Dependency Chain:")
+            for line in failure.format_chain().split("\n"):
+                print(f"        {line}")
+
+        # Write JSON report
+        failures_file = self.ctx.work_dir / "test-mode-failures.json"
+        report = {
+            "summary": summary,
+            "failures": [failure.to_dict() for failure in failures],
+        }
+        with open(failures_file, "w") as outfile:
+            json.dump(report, outfile, indent=2, default=str)
+
+        print("\n" + "=" * 80)
+        print(f"Detailed failure report written to: {failures_file}")
+        print("=" * 80 + "\n")
+
+        # Log critical failures (those without fallback)
+        critical_failures = [
+            failure
+            for failure in failures
+            if failure.fallback_status == "prebuilt_failed"
+        ]
+        if critical_failures:
+            logger.error(
+                "The following packages failed to build AND have no prebuilt fallback:"
+            )
+            for failure in critical_failures:
+                logger.error(f"  - {failure.req.name}=={failure.version}")

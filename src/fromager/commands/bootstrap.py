@@ -1,4 +1,5 @@
 import logging
+import sys
 import time
 import typing
 from datetime import timedelta
@@ -97,6 +98,17 @@ def _get_requirements_from_args(
     default=False,
     help="Skip generating constraints.txt file to allow building collections with conflicting versions",
 )
+@click.option(
+    "--test-mode",
+    "test_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Continue on build failures, treating failed packages as pre-built. "
+        "Produces a failure report at the end and exits with non-zero code "
+        "if any builds failed."
+    ),
+)
 @click.argument("toplevel", nargs=-1)
 @click.pass_obj
 def bootstrap(
@@ -106,6 +118,7 @@ def bootstrap(
     cache_wheel_server_url: str | None,
     sdist_only: bool,
     skip_constraints: bool,
+    test_mode: bool,
     toplevel: list[str],
 ) -> None:
     """Compute and build the dependencies of a set of requirements recursively
@@ -139,6 +152,9 @@ def bootstrap(
     if pre_built:
         logger.info("treating %s as pre-built wheels", sorted(pre_built))
 
+    if test_mode:
+        logger.info("TEST MODE enabled: will continue on build failures")
+
     server.start_wheel_server(wkctx)
 
     with progress.progress_context(total=len(to_build * 2)) as progressbar:
@@ -148,6 +164,7 @@ def bootstrap(
             prev_graph,
             cache_wheel_server_url,
             sdist_only=sdist_only,
+            test_mode=test_mode,
         )
 
         # we need to resolve all the top level dependencies before we start bootstrapping.
@@ -201,6 +218,11 @@ def bootstrap(
     logger.debug("match_py_req LRU cache: %r", resolver.match_py_req.cache_info())
 
     metrics.summarize(wkctx, "Bootstrapping")
+
+    # Test mode: report failures and exit with error if any occurred
+    if test_mode and bt.has_failures():
+        bt.report_test_mode_failures()
+        sys.exit(1)
 
 
 def write_constraints_file(
@@ -459,6 +481,17 @@ bootstrap._fromager_show_build_settings = True  # type: ignore
     default=None,
     help="maximum number of parallel workers to run (default: unlimited)",
 )
+@click.option(
+    "--test-mode",
+    "test_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Continue on build failures, treating failed packages as pre-built. "
+        "Produces a failure report at the end and exits with non-zero code "
+        "if any builds failed."
+    ),
+)
 @click.argument("toplevel", nargs=-1)
 @click.pass_obj
 @click.pass_context
@@ -472,6 +505,7 @@ def bootstrap_parallel(
     skip_constraints: bool,
     force: bool,
     max_workers: int | None,
+    test_mode: bool,
     toplevel: list[str],
 ) -> None:
     """Bootstrap and build-parallel
@@ -495,6 +529,7 @@ def bootstrap_parallel(
         cache_wheel_server_url=cache_wheel_server_url,
         sdist_only=True,
         skip_constraints=skip_constraints,
+        test_mode=test_mode,
         toplevel=toplevel,
     )
 
