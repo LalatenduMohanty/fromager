@@ -15,8 +15,10 @@ from fromager.packagesettings import (
     EnvVars,
     GitOptions,
     Package,
+    PackageBuildInfo,
     PackageSettings,
     ResolverDist,
+    Settings,
     SettingsFile,
     Variant,
     substitute_template,
@@ -805,3 +807,149 @@ def test_use_pypi_org_metadata(testdata_context: context.WorkContext) -> None:
         "somepackage_without_customization"
     )
     assert pbi.use_pypi_org_metadata
+
+
+class TestGetExtraEnvironVersion:
+    """Tests for ${__version__} template variable in env settings.
+
+    PackageBuildInfo.get_extra_environ() should make the package version
+    available as ${__version__} for template substitution in env entries.
+    """
+
+    PARALLEL: typing.ClassVar[dict[str, str]] = {
+        "CMAKE_BUILD_PARALLEL_LEVEL": "1",
+        "MAKEFLAGS": "-j1",
+        "MAX_JOBS": "1",
+    }
+
+    def _make_pbi(self, env_yaml: str, tmp_path: pathlib.Path) -> PackageBuildInfo:
+        """Create a PackageBuildInfo with custom env settings."""
+        ps = PackageSettings.from_string("version-test-pkg", env_yaml)
+        settings = Settings(
+            settings=SettingsFile(),
+            package_settings=[ps],
+            variant="cpu",
+            patches_dir=tmp_path,
+            max_jobs=1,
+        )
+        return settings.package_build_info("version-test-pkg")
+
+    def test_version_available_as_template_variable(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Verify ${__version__} resolves to the package version."""
+        pbi = self._make_pbi(
+            """
+env:
+    MY_VERSION: "${__version__}"
+""",
+            tmp_path,
+        )
+        result = pbi.get_extra_environ(template_env={}, version=Version("2.1.0"))
+        assert result == {"MY_VERSION": "2.1.0"} | self.PARALLEL
+        assert "__version__" not in result
+
+    def test_version_in_compound_expression(self, tmp_path: pathlib.Path) -> None:
+        """Verify ${__version__} works inside a larger string."""
+        pbi = self._make_pbi(
+            """
+env:
+    DOWNLOAD_URL: "https://example.com/releases/v${__version__}/lib.tar.gz"
+""",
+            tmp_path,
+        )
+        result = pbi.get_extra_environ(template_env={}, version=Version("3.0.1"))
+        assert (
+            result
+            == {
+                "DOWNLOAD_URL": "https://example.com/releases/v3.0.1/lib.tar.gz",
+            }
+            | self.PARALLEL
+        )
+        assert "__version__" not in result
+
+    def test_version_none_with_default(self, tmp_path: pathlib.Path) -> None:
+        """Verify ${__version__:-unknown} falls back when version is None."""
+        pbi = self._make_pbi(
+            """
+env:
+    MY_VERSION: "${__version__:-unknown}"
+""",
+            tmp_path,
+        )
+        result = pbi.get_extra_environ(template_env={}, version=None)
+        assert result == {"MY_VERSION": "unknown"} | self.PARALLEL
+        assert "__version__" not in result
+
+    def test_version_none_without_default_raises(self, tmp_path: pathlib.Path) -> None:
+        """Verify ${__version__} without default raises when version is None."""
+        pbi = self._make_pbi(
+            """
+env:
+    MY_VERSION: "${__version__}"
+""",
+            tmp_path,
+        )
+        with pytest.raises(ValueError, match="__version__"):
+            pbi.get_extra_environ(template_env={}, version=None)
+
+    def test_version_does_not_interfere_with_existing_vars(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Verify existing template variables still work when version is provided."""
+        pbi = self._make_pbi(
+            """
+env:
+    JOBS: "${MAX_JOBS}"
+    CUSTOM: "${MYVAR}"
+""",
+            tmp_path,
+        )
+        result = pbi.get_extra_environ(
+            template_env={"MYVAR": "hello"}, version=Version("1.0.0")
+        )
+        assert (
+            result
+            == {
+                "JOBS": "1",
+                "CUSTOM": "hello",
+            }
+            | self.PARALLEL
+        )
+        assert "__version__" not in result
+
+    def test_version_referenced_by_subsequent_env_entry(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Verify env entries can chain off __version__."""
+        pbi = self._make_pbi(
+            """
+env:
+    PKG_VER: "${__version__}"
+    PKG_TAG: "v${PKG_VER}"
+""",
+            tmp_path,
+        )
+        result = pbi.get_extra_environ(template_env={}, version=Version("4.2.0"))
+        assert (
+            result
+            == {
+                "PKG_VER": "4.2.0",
+                "PKG_TAG": "v4.2.0",
+            }
+            | self.PARALLEL
+        )
+        assert "__version__" not in result
+
+    def test_version_provided_but_not_referenced(self, tmp_path: pathlib.Path) -> None:
+        """Verify passing version when no env entries reference it is a no-op."""
+        pbi = self._make_pbi(
+            """
+env:
+    SOME_FLAG: "enabled"
+""",
+            tmp_path,
+        )
+        result = pbi.get_extra_environ(template_env={}, version=Version("5.0.0"))
+        assert result == {"SOME_FLAG": "enabled"} | self.PARALLEL
+        assert "__version__" not in result

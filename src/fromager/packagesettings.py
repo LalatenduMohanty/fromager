@@ -899,6 +899,10 @@ class PackageBuildInfo:
         else:
             template_env = template_env.copy()
 
+        # make package version available as ${__version__} for substitution
+        if version is not None:
+            template_env["__version__"] = str(version)
+
         # configure max jobs settings, settings depend on package, available
         # CPU cores, and available virtual memory.
         jobs = self.parallel_jobs()
