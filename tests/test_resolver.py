@@ -147,7 +147,7 @@ def test_provider_cache_key_pypi(pypi_hydra_resolver: typing.Any) -> None:
     provider = pypi_hydra_resolver.provider
     assert provider.cache_key == "https://pypi.org/simple/"
     req_cache = provider._get_cached_candidates(req.name)
-    assert req_cache == []
+    assert req_cache is None
 
     result = pypi_hydra_resolver.resolve([req])
     candidate = result.mapping[req.name]
@@ -1313,10 +1313,12 @@ def test_get_cached_candidates_returns_defensive_copy() -> None:
 
     # Get candidates again and mutate the returned list
     first = provider._get_cached_candidates(identifier)
+    assert first is not None
     first.append(_make_candidate("test-pkg", "2.0.0"))
 
     # The cache should not reflect the caller's mutation
     second = provider._get_cached_candidates(identifier)
+    assert second is not None
     assert len(second) == 1, (
         "_get_cached_candidates should return a defensive copy, "
         "not a direct reference to the internal cache"

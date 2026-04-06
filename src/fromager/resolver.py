@@ -580,18 +580,20 @@ class BaseProvider(ExtrasProvider):
                 self._cache_locks[identifier] = threading.Lock()
             return self._cache_locks[identifier]
 
-    def _get_cached_candidates(self, identifier: str) -> list[Candidate]:
+    def _get_cached_candidates(self, identifier: str) -> list[Candidate] | None:
         """Get a copy of cached candidates for identifier and provider.
 
-        The method always returns a list. If the cache did not have an entry
-        before, a new empty list is stored in the cache. A copy is returned
-        so callers cannot accidentally corrupt the cache.
+        Returns None if no entry exists in the cache, or a copy of the cached
+        list (which may be empty). A copy is returned so callers cannot
+        accidentally corrupt the cache.
 
         Must be called under the per-identifier lock from _get_identifier_lock.
         """
         cls = type(self)
         provider_cache = cls.resolver_cache.setdefault(identifier, {})
-        candidate_cache = provider_cache.setdefault((cls, self.cache_key), [])
+        candidate_cache = provider_cache.get((cls, self.cache_key))
+        if candidate_cache is None:
+            return None
         return list(candidate_cache)
 
     def _set_cached_candidates(
@@ -624,7 +626,7 @@ class BaseProvider(ExtrasProvider):
         lock = self._get_identifier_lock(identifier)
         with lock:
             cached_candidates = self._get_cached_candidates(identifier)
-            if cached_candidates:
+            if cached_candidates is not None:
                 logger.debug(
                     "%s: use %i cached candidates",
                     identifier,
