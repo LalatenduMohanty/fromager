@@ -1,5 +1,7 @@
 import datetime
 import re
+import threading
+import time
 import typing
 
 import pytest
@@ -11,6 +13,7 @@ from packaging.version import Version
 
 from fromager import constraints, resolver
 from fromager.__main__ import main as fromager
+from fromager.candidate import Candidate
 
 _hydra_core_simple_response = """
 <!DOCTYPE html>
@@ -153,10 +156,8 @@ def test_provider_cache_key_pypi(pypi_hydra_resolver: typing.Any) -> None:
     resolver_cache = resolver.BaseProvider.resolver_cache
     assert req.name in resolver_cache
     assert (resolver.PyPIProvider, provider.cache_key) in resolver_cache[req.name]
-    # mutated in place
-    assert provider._get_cached_candidates(req.name) is req_cache
+    # _get_cached_candidates returns a defensive copy, not the same object
     assert len(provider._get_cached_candidates(req.name)) == 7
-    assert len(req_cache) == 7
 
 
 def test_provider_cache_key_gitlab(gitlab_decile_resolver: typing.Any) -> None:
@@ -1278,3 +1279,95 @@ def test_cli_package_resolver(
     assert "- PyPI versions: 1.2.2, 1.3.1+local, 1.3.2, 2.0.0a1" in result.stdout
     assert "- only wheels on PyPI: 1.3.1+local, 2.0.0a1" in result.stdout
     assert "- missing from Fromager: 1.3.1+local, 2.0.0a1" in result.stdout
+
+
+def _make_candidate(name: str, version: str) -> Candidate:
+    """Create a minimal Candidate for testing."""
+    return Candidate(
+        name=name, version=Version(version), url="https://example.com", is_sdist=False
+    )
+
+
+class _StubProvider(resolver.BaseProvider):
+    """Minimal BaseProvider subclass for cache tests."""
+
+    provider_description = "stub"
+
+    @property
+    def cache_key(self) -> str:
+        return "stub-key"
+
+    def find_candidates(self, identifier: str) -> list[Candidate]:
+        return []
+
+
+def test_get_cached_candidates_returns_defensive_copy() -> None:
+    """Mutating the list returned by _get_cached_candidates must not corrupt the cache."""
+    provider = _StubProvider()
+    identifier = "test-pkg"
+
+    # Seed the cache directly so the test doesn't depend on the aliasing bug
+    resolver.BaseProvider.resolver_cache[identifier] = {
+        (type(provider), provider.cache_key): [_make_candidate("test-pkg", "1.0.0")]
+    }
+
+    # Get candidates again and mutate the returned list
+    first = provider._get_cached_candidates(identifier)
+    first.append(_make_candidate("test-pkg", "2.0.0"))
+
+    # The cache should not reflect the caller's mutation
+    second = provider._get_cached_candidates(identifier)
+    assert len(second) == 1, (
+        "_get_cached_candidates should return a defensive copy, "
+        "not a direct reference to the internal cache"
+    )
+    assert second[0].version == Version("1.0.0")
+
+
+def test_find_cached_candidates_thread_safe() -> None:
+    """Concurrent threads must not bypass the cache and call find_candidates multiple times."""
+    call_count = 0
+    call_count_lock = threading.Lock()
+
+    class _SlowProvider(resolver.BaseProvider):
+        """Provider with a slow find_candidates to expose thread races."""
+
+        provider_description = "slow"
+
+        @property
+        def cache_key(self) -> str:
+            return "slow-key"
+
+        def find_candidates(self, identifier: str) -> list[Candidate]:
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+            time.sleep(0.2)
+            return [_make_candidate(identifier, "1.0.0")]
+
+    barrier = threading.Barrier(4)
+
+    def resolve_in_thread(provider: _SlowProvider, ident: str) -> None:
+        barrier.wait(timeout=5)
+        list(provider._find_cached_candidates(ident))
+
+    providers = [_SlowProvider() for _ in range(4)]
+    threads = [
+        threading.Thread(
+            target=resolve_in_thread,
+            args=(thread_provider, "shared-pkg"),
+            name=f"resolver-{i}",
+        )
+        for i, thread_provider in enumerate(providers)
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert call_count == 1, (
+        f"find_candidates() was called {call_count} times; expected 1. "
+        "Without thread-safe caching, multiple threads bypass the cache "
+        "and redundantly call find_candidates()."
+    )
