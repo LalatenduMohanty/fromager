@@ -103,7 +103,7 @@ def resolve(
         req_type=req_type,
         ignore_platform=ignore_platform,
     )
-    provider.cooldown = resolve_package_cooldown(ctx, req, req_type=req_type)
+    _configure_provider(provider, ctx=ctx, req=req, req_type=req_type)
     max_age_cutoff = _compute_max_age_cutoff(ctx)
     results = find_all_matching_from_provider(
         provider, req, max_age_cutoff=max_age_cutoff
@@ -184,6 +184,25 @@ def resolve_package_cooldown(
         min_age=datetime.timedelta(days=per_package_days),
         bootstrap_time=bootstrap_time,
     )
+
+
+def _configure_provider(
+    provider: BaseProvider,
+    *,
+    ctx: context.WorkContext,
+    req: Requirement,
+    req_type: RequirementType | None = None,
+    supports_upload_time: bool | None = None,
+) -> BaseProvider:
+    """Apply cooldown and upload-time settings to a freshly-constructed provider.
+
+    Centralizes post-construction configuration so that callers of
+    ``overrides.find_and_invoke()`` cannot forget to apply cooldown.
+    """
+    provider.cooldown = resolve_package_cooldown(ctx, req, req_type=req_type)
+    if supports_upload_time is not None:
+        provider.supports_upload_time = supports_upload_time
+    return provider
 
 
 def _compute_max_age_cutoff(

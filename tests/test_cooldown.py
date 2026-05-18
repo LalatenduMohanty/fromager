@@ -941,3 +941,59 @@ def test_resolve_package_cooldown_toplevel_compound_specifier_not_exempt(
         ctx, Requirement("test-pkg==1.0,>0.9"), req_type=RequirementType.TOP_LEVEL
     )
     assert result is _COOLDOWN
+
+
+class TestConfigureProvider:
+    """Tests for resolver._configure_provider()."""
+
+    def test_applies_cooldown(self, tmp_path: pathlib.Path) -> None:
+        """_configure_provider() sets cooldown from resolve_package_cooldown()."""
+        ctx = _make_ctx(tmp_path, cooldown=_COOLDOWN)
+        provider = resolver.PyPIProvider(
+            include_sdists=True,
+            include_wheels=True,
+            sdist_server_url="https://pypi.org/simple/",
+        )
+        assert provider.cooldown is None
+
+        resolver._configure_provider(
+            provider, ctx=ctx, req=Requirement("test-pkg"), req_type=None
+        )
+
+        assert provider.cooldown == _COOLDOWN
+
+    def test_overrides_supports_upload_time(self, tmp_path: pathlib.Path) -> None:
+        """_configure_provider() can override supports_upload_time."""
+        ctx = _make_ctx(tmp_path, cooldown=_COOLDOWN)
+        provider = resolver.PyPIProvider(
+            include_sdists=False,
+            include_wheels=True,
+            sdist_server_url="https://pypi.org/simple/",
+        )
+        assert provider.supports_upload_time is True
+
+        resolver._configure_provider(
+            provider,
+            ctx=ctx,
+            req=Requirement("test-pkg"),
+            supports_upload_time=False,
+        )
+
+        assert provider.supports_upload_time is False
+        assert provider.cooldown == _COOLDOWN
+
+    def test_preserves_supports_upload_time_when_none(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """_configure_provider() leaves supports_upload_time untouched when not specified."""
+        ctx = _make_ctx(tmp_path, cooldown=_COOLDOWN)
+        provider = resolver.PyPIProvider(
+            include_sdists=False,
+            include_wheels=True,
+            sdist_server_url="https://pypi.org/simple/",
+        )
+        original_value = provider.supports_upload_time
+
+        resolver._configure_provider(provider, ctx=ctx, req=Requirement("test-pkg"))
+
+        assert provider.supports_upload_time == original_value

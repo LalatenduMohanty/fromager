@@ -153,7 +153,7 @@ def get_source_provider(
             ignore_platform=pbi.resolver_ignore_platform,
         ),
     )
-    provider.cooldown = resolver.resolve_package_cooldown(ctx, req, req_type=req_type)
+    resolver._configure_provider(provider, ctx=ctx, req=req, req_type=req_type)
     return provider
 
 
