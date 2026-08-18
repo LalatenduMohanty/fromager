@@ -2590,6 +2590,91 @@ class TestBackgroundWork:
         assert bg is not None
         assert callable(bg)
 
+    def test_prebuilt_background_work_invokes_bg_prepare_prebuilt(
+        self, tmp_context: WorkContext
+    ) -> None:
+        """Calling the prebuilt closure invokes bg_prepare_prebuilt, not source path."""
+        bt = bootstrapper.Bootstrapper(tmp_context)
+        wi = _make_work_item(
+            req="testpkg",
+            version="1.0",
+            source_url="https://pypi.test/testpkg-1.0-py3-none-any.whl",
+            pbi_pre_built=True,
+        )
+        item = PrepareSource(wi)
+        bg = item.background_work(bt)
+        assert bg is not None
+
+        mock_result = PreparedSourceData(
+            wheel_filename=tmp_context.work_dir / "testpkg-1.0-py3-none-any.whl",
+            unpack_dir=tmp_context.work_dir / "testpkg-1.0",
+        )
+
+        with (
+            patch(
+                "fromager.bootstrapper._cache.bg_prepare_prebuilt",
+                return_value=mock_result,
+            ) as mock_prebuilt,
+            patch(
+                "fromager.bootstrapper._prepare_source._bg_prepare_source",
+            ) as mock_source,
+            patch(
+                "fromager.bootstrapper._cache.find_cached_wheel",
+            ) as mock_find_cached,
+        ):
+            result = bg()
+
+        assert result is mock_result
+        mock_prebuilt.assert_called_once_with(
+            tmp_context,
+            Requirement("testpkg"),
+            RequirementType.INSTALL,
+            Version("1.0"),
+            "https://pypi.test/testpkg-1.0-py3-none-any.whl",
+        )
+        mock_source.assert_not_called()
+        mock_find_cached.assert_not_called()
+
+    def test_source_background_work_invokes_bg_prepare_source(
+        self, tmp_context: WorkContext
+    ) -> None:
+        """Calling the source closure invokes _bg_prepare_source, not prebuilt path."""
+        bt = bootstrapper.Bootstrapper(tmp_context)
+        wi = _make_work_item(
+            req="testpkg",
+            version="1.0",
+            source_url="https://pypi.test/testpkg-1.0.tar.gz",
+            pbi_pre_built=False,
+        )
+        item = PrepareSource(wi)
+        bg = item.background_work(bt)
+        assert bg is not None
+
+        mock_result = PreparedSourceData(
+            sdist_root_dir=tmp_context.work_dir / "testpkg-1.0" / "testpkg-1.0",
+        )
+
+        with (
+            patch(
+                "fromager.bootstrapper._prepare_source._bg_prepare_source",
+                return_value=mock_result,
+            ) as mock_source,
+            patch(
+                "fromager.bootstrapper._cache.bg_prepare_prebuilt",
+            ) as mock_prebuilt,
+        ):
+            result = bg()
+
+        assert result is mock_result
+        mock_source.assert_called_once_with(
+            tmp_context,
+            bt.cache_wheel_server_url,
+            Requirement("testpkg"),
+            Version("1.0"),
+            "https://pypi.test/testpkg-1.0.tar.gz",
+        )
+        mock_prebuilt.assert_not_called()
+
 
 class TestAsJson:
     """Tests for Phase.as_json() serialization."""
